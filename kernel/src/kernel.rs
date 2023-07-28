@@ -683,6 +683,27 @@ impl Kernel {
                         },
                     }
                 }
+                process::State::YieldedFor(upcall_id) => {
+                    // If this process is waiting for a specific upcall, see if
+                    // it is ready. If so, dequeue and execute it, otherwise move on.
+                    match process.dequeue_specific_upcall(upcall_id) {
+                        None => break,
+                        Some(ccb) => {
+                            if config::CONFIG.trace_syscalls {
+                                debug!(
+                                    "[{:?}] function_call @{:#x}({:#x}, {:#x}, {:#x}, {:#x})",
+                                    process.processid(),
+                                    ccb.pc,
+                                    ccb.argument0,
+                                    ccb.argument1,
+                                    ccb.argument2,
+                                    ccb.argument3,
+                                );
+                            }
+                            process.set_process_function(ccb);
+                        }
+                    }
+                }
                 process::State::CredentialsApproved => {
                     // The process's credentials are approved and it's
                     // potentially runnable, but actually running
@@ -792,7 +813,9 @@ impl Kernel {
         match syscall {
             Syscall::Yield {
                 which: _,
-                address: _,
+                param1: _,
+                param2: _,
+                param3: _,
             } => {} // Yield is not filterable.
             Syscall::Exit {
                 which: _,
@@ -837,49 +860,58 @@ impl Kernel {
                 }
                 process.set_syscall_return_value(rval);
             }
-            Syscall::Yield { which, address } => {
+            Syscall::Yield {
+                which,
+                param1,
+                param2,
+                param3: _,
+            } => {
                 if config::CONFIG.trace_syscalls {
                     debug!("[{:?}] yield. which: {}", process.processid(), which);
                 }
-                if which > (YieldCall::Wait as usize) {
-                    // Only 0 and 1 are valid, so this is not a valid yield
-                    // system call, Yield does not have a return value because
-                    // it can push a function call onto the stack; just return
-                    // control to the process.
-                    return;
-                }
-                let wait = which == (YieldCall::Wait as usize);
-                // If this is a yield-no-wait AND there are no pending tasks,
-                // then return immediately. Otherwise, go into the yielded state
-                // and execute tasks now or when they arrive.
-                let return_now = !wait && !process.has_tasks();
-                if return_now {
-                    // Set the "did I trigger upcalls" flag to be 0, return
-                    // immediately. If address is invalid does nothing.
-                    //
-                    // # Safety
-                    //
-                    // This is fine as long as no references to the process's
-                    // memory exist. We do not have a reference, so we can
-                    // safely call `set_byte()`.
-                    unsafe {
-                        process.set_byte(address, 0);
+                match which {
+                    which if which == YieldCall::NoWait as usize => {
+                        // If this is a yield-no-wait AND there are no pending tasks,
+                        // then return immediately. Otherwise, go into the yielded state
+                        // and execute tasks now or when they arrive.
+                        let has_tasks = process.has_tasks();
+
+                        // Set the "did I trigger upcalls" flag.
+                        // If address is invalid does nothing.
+                        //
+                        // # Safety
+                        //
+                        // This is fine as long as no references to the process's
+                        // memory exist. We do not have a reference, so we can
+                        // safely call `set_byte()`.
+                        unsafe {
+                            let address = param1 as *mut u8;
+                            process.set_byte(address, has_tasks as u8);
+                        }
+
+                        if has_tasks {
+                            process.set_yielded_state();
+                        }
                     }
-                } else {
-                    // There are already enqueued upcalls to execute or we
-                    // should wait for them: handle in the next loop iteration
-                    // and set the "did I trigger upcalls" flag to be 1. If
-                    // address is invalid does nothing.
-                    //
-                    // # Safety
-                    //
-                    // This is fine as long as no references to the process's
-                    // memory exist. We do not have a reference, so we can
-                    // safely call `set_byte()`.
-                    unsafe {
-                        process.set_byte(address, 1);
+
+                    which if which == YieldCall::Wait as usize => {
+                        process.set_yielded_state();
                     }
-                    process.set_yielded_state();
+
+                    which if which == YieldCall::WaitFor as usize => {
+                        let upcall_id = UpcallId {
+                            driver_num: param1,
+                            subscribe_num: param2,
+                        };
+                        process.set_yielded_for_state(upcall_id);
+                    }
+
+                    _ => {
+                        // Only 0, 1, and 2 are valid, so this is not a valid yield
+                        // system call, Yield does not have a return value because
+                        // it can push a function call onto the stack; just return
+                        // control to the process.
+                    }
                 }
             }
             Syscall::Subscribe { driver_number, .. }

@@ -51,6 +51,7 @@ pub enum SyscallClass {
 pub enum YieldCall {
     NoWait = 0,
     Wait = 1,
+    WaitFor = 2,
 }
 
 // Required as long as no solution to
@@ -79,7 +80,12 @@ impl TryFrom<u8> for SyscallClass {
 pub enum Syscall {
     /// Structure representing an invocation of the Yield system call class.
     /// `which` is the Yield identifier value and `address` is the no wait field.
-    Yield { which: usize, address: *mut u8 },
+    Yield {
+        which: usize,
+        param1: usize,
+        param2: usize,
+        param3: usize,
+    },
 
     /// Structure representing an invocation of the Subscribe system call
     /// class. `driver_number` is the driver identifier, `subdriver_number`
@@ -168,7 +174,9 @@ impl Syscall {
         match SyscallClass::try_from(syscall_number) {
             Ok(SyscallClass::Yield) => Some(Syscall::Yield {
                 which: r0,
-                address: r1 as *mut u8,
+                param1: r1,
+                param2: r2,
+                param3: r3,
             }),
             Ok(SyscallClass::Subscribe) => Some(Syscall::Subscribe {
                 driver_number: r0,
